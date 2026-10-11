@@ -1,20 +1,25 @@
 from __future__ import annotations
 import json
-from confluent_kafka import Producer
+import os
+from kafka import KafkaProducer
 from .models import Transaction
 
 
 class TransactionKafkaProducer:
     def __init__(
         self,
-        bootstrap_servers: str = "localhost:9092",
-        topic: str = "transactions",
+        bootstrap_servers: str | None = None,
+        topic: str | None = None,
     ) -> None:
-        self.topic = topic
-        self.producer = Producer(
-            {
-                "bootstrap.servers": bootstrap_servers,
-            }
+        self.bootstrap_servers = bootstrap_servers or os.getenv(
+            "KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"
+        )
+        self.topic = topic or os.getenv("KAFKA_TOPIC", "transactions")
+        self.delivered_count = 0
+        self.delivery_errors: list[str] = []
+        self.producer = KafkaProducer(
+            bootstrap_servers=self.bootstrap_servers,
+            acks="all",
         )
 
     def send(self, transaction: Transaction) -> None:
@@ -23,21 +28,30 @@ class TransactionKafkaProducer:
             ensure_ascii=False,
         ).encode("utf-8")
 
-        self.producer.produce(
-            topic=self.topic,
+        delivery_future = self.producer.send(
+            self.topic,
             key=transaction.user_id.encode("utf-8"),
             value=value,
-            callback=self._delivery_report,
         )
-
-        # Kafka 내부 delivery callback 처리 기회를 줌
-        self.producer.poll(0)
+        delivery_future.add_callback(self._delivery_report)
+        delivery_future.add_errback(self._delivery_failed)
 
     def close(self) -> None:
-        # 아직 전송되지 않은 메시지가 있으면 전부 전송하고 종료함
-        self.producer.flush()
+        """Flush pending events and report whether every event reached Kafka."""
+        try:
+            self.producer.flush(timeout=10)
+        finally:
+            self.producer.close(timeout=10)
+        if self.delivery_errors:
+            raise RuntimeError("Kafka delivery failed: " + "; ".join(self.delivery_errors))
 
-    @staticmethod
-    def _delivery_report(err, msg) -> None:
-        if err is not None:
-            print(f"Kafka delivery failed: {err}")
+        print(
+            f"Kafka delivery succeeded: {self.delivered_count} message(s) "
+            f"to topic '{self.topic}'."
+        )
+
+    def _delivery_report(self, record_metadata) -> None:
+        self.delivered_count += 1
+
+    def _delivery_failed(self, error) -> None:
+        self.delivery_errors.append(str(error))

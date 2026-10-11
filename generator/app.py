@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from .kafka_producer import TransactionKafkaProducer
 
 try:
     from .models import Scenario
@@ -56,6 +55,15 @@ def main() -> None:
     producer = None
 
     if args.output == "kafka":
+        try:
+            from .kafka_producer import TransactionKafkaProducer
+        except ModuleNotFoundError as error:
+            if error.name == "kafka":
+                raise SystemExit(
+                    "Kafka output requires the 'kafka-python' package. "
+                    "Run: python -m pip install -r requirements.txt"
+                ) from error
+            raise
         producer = TransactionKafkaProducer()
 
     try:
